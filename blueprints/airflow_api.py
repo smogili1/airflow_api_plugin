@@ -11,6 +11,7 @@ from airflow.exceptions import AirflowException, AirflowConfigException
 from airflow.models import DagBag, DagRun
 from airflow.utils.state import State
 from airflow.utils.dates import date_range as utils_date_range
+from airflow.utils import timezone
 from airflow.www.app import csrf
 
 airflow_api_blueprint = Blueprint('airflow_api', __name__, url_prefix='/api/v1')
@@ -99,7 +100,7 @@ def find_dag_runs(session, dag_id, dag_run_id, execution_date):
 
 @airflow_api_blueprint.route('/dags', methods=['GET'])
 def dags_index():
-    dagbag = DagBag('dags')
+    dagbag = DagBag()
     dags = []
     for dag_id in dagbag.dags:
         payload = {
@@ -206,17 +207,21 @@ def create_dag_run():
     conf = None
     if 'conf' in data and data['conf'] is not None:
         if isinstance(data['conf'], six.string_types):
-            conf = data['conf']
+            conf = json.loads(data['conf'])
         else:
             try:
-                conf = json.dumps(data['conf'])
+                conf = data['conf']
             except Exception:
                 return ApiResponse.bad_request('Could not encode specified conf JSON')
+    
+    execution_date = timezone.utcnow()
+    
 
     try:
         session = settings.Session()
+        assert timezone.is_localized(execution_date)
 
-        dagbag = DagBag('dags')
+        dagbag = DagBag()
 
         if dag_id not in dagbag.dags:
             return ApiResponse.bad_request("Dag id {} not found".format(dag_id))
@@ -224,39 +229,24 @@ def create_dag_run():
         dag = dagbag.get_dag(dag_id)
 
         # ensure run data has all required attributes and that everything is valid, returns transformed data
-        runs = utils_date_range(start_date=start_date, end_date=end_date, delta=dag._schedule_interval)
+        #runs = utils_date_range(start_date=start_date, end_date=end_date, delta=dag._schedule_interval)
 
-        if len(runs) > limit and partial is False:
-            error = '{} dag runs would be created, which exceeds the limit of {}.' \
-                    ' Reduce start/end date to reduce the dag run count'
-            return ApiResponse.bad_request(error.format(len(runs), limit))
+        #if len(runs) > limit and partial is False:
+        #    error = '{} dag runs would be created, which exceeds the limit of {}.' \
+        #            ' Reduce start/end date to reduce the dag run count'
+        #    return ApiResponse.bad_request(error.format(len(runs), limit))
 
-        payloads = []
-        for exec_date in runs:
-            run_id = '{}_{}'.format(prefix, exec_date.isoformat())
+        run_id = '{}_{}'.format(prefix, execution_date.isoformat())
 
-            if find_dag_runs(session, dag_id, run_id, exec_date):
-                continue
-
-            payloads.append({
-                'run_id': run_id,
-                'execution_date': exec_date,
-                'conf': conf
-            })
-
-        results = []
-        for index, run in enumerate(payloads):
-            if len(results) >= limit:
-                break
-
-            dag.create_dagrun(
-                run_id=run['run_id'],
-                execution_date=run['execution_date'],
-                state=State.RUNNING,
-                conf=conf,
-                external_trigger=True
-            )
-            results.append(run['run_id'])
+        dag.create_dagrun(
+            run_id=run_id,
+            execution_date=execution_date,
+            state=State.RUNNING,
+            conf=conf,
+            external_trigger=True
+        )
+        
+        results = run_id
 
         session.close()
     except ApiInputException as e:
